@@ -1,0 +1,4 @@
+flask>=3.0
+openai>=1.30
+chromadb>=0.5
+gunicorn>=22.0
