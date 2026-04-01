@@ -34,6 +34,23 @@ router = A2ARouter()
 router.register_agent("sql_agent", sql_agent_execute)
 router.register_agent("ir_agent", ir_agent_execute)
 
+# Initialize databases on module load (needed for gunicorn on Render)
+import os
+if not os.path.exists(os.path.join(os.path.dirname(__file__), "demo_data.db")):
+    init_database()
+if not os.path.exists(os.path.join(os.path.dirname(__file__), "chroma_db")):
+    init_vector_db()
+else:
+    # Ensure vector DB has data (Render ephemeral filesystem may reset)
+    try:
+        import chromadb
+        _c = chromadb.PersistentClient(path=os.path.join(os.path.dirname(__file__), "chroma_db"))
+        _col = _c.get_collection("policy_docs")
+        if _col.count() == 0:
+            init_vector_db()
+    except Exception:
+        init_vector_db()
+
 
 # ============================================================
 # Orchestrator Agent (主管 AI)
