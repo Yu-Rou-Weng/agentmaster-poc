@@ -86,6 +86,22 @@ Compatibility: Dimensity 9400 / 8300 platform, Android 16 BSP v2.1+""",
 6. Monthly CR metrics review: open/close ratio, average resolution time, recurrence rate.
 7. Modules exceeding 5 open Critical CRs are escalated to VP Engineering for resource reallocation.""",
     },
+
+    {"id": "knowhow-modem-001", "title": "[Modem Know-How] 5G NR Handover 常見失敗原因與排查步驟",
+     "category": "knowhow", "domain": "modem",
+     "content": """作者：Engineer_A (Modem Team)\nQ: 5G NR handover 失敗要怎麼排查？\n排查步驟：\n1. 確認是 intra-freq 還是 inter-freq handover，看 RRC Reconfiguration 的 measConfig\n2. 抓 modem log 搜尋 HO_FAIL 或 RLF\n3. 檢查 measurement gap 設定，常見問題是 gap pattern 跟 SSB periodicity 衝突\n4. 確認 target cell PCI 有沒有 confusion（PCI mod 3 相同導致偵測錯誤）\n5. CHO threshold 是否設太低\n常見地雷：Timing Advance 沒帶入→RACH失敗；measObjectNR ssbFrequency 不一致；NSA模式 A2 event threshold 太敏感\n相關 CR：CR-2026-005（已修復）"""},
+    {"id": "knowhow-modem-002", "title": "[Modem Know-How] VoNR 通話建立失敗的 Debug 流程",
+     "category": "knowhow", "domain": "modem",
+     "content": """作者：Engineer_A\nQ: VoNR call setup 失敗怎麼查？\n1. 確認 IMS registration (AT+CIREG?)\n2. 抓 SIP trace 看 INVITE 和 100 Trying\n3. 常見：SIP timer T1 太短(預設500ms)；QoS flow 沒建立(查PDU Session Modification QFI=1)；Codec negotiation 失敗(確認SDP有AMR-WB和EVS)\n踩坑：某客戶不支援EVS只帶EVS→488 Not Acceptable，確保AMR-WB作fallback\nCR-2026-010: SIP timer VoNR用了VoLTE設定值"""},
+    {"id": "knowhow-power-001", "title": "[Power Know-How] Idle 功耗異常的排查 SOP",
+     "category": "knowhow", "domain": "power",
+     "content": """作者：Engineer_C (Power Team)\nQ: 手機待機功耗偏高怎麼查？\n1. Power monitor量suspend電流，正常<5mA\n2. 查wakelock: adb shell dumpsys power | grep Wake Locks\n3. 查PMIC: cat /sys/kernel/debug/regulator/regulator_summary，常見某regulator沒進LPM\n4. Modem: 檢查eDRX/PSM、paging cycle\n5. Connectivity: Wi-Fi beacon interval(DTIM x3+)、BT LE scan背景\n地雷：Sensor hub I2C沒clock gating→2-3mA(CR-2026-012)；GPS TCXO沒關→8mA；PMIC S2R slew rate錯→延遲deep sleep"""},
+    {"id": "knowhow-connectivity-001", "title": "[Connectivity Know-How] Wi-Fi 7 MLO 斷線問題排查",
+     "category": "knowhow", "domain": "connectivity",
+     "content": """作者：Engineer_E (Connectivity Team)\nQ: Wi-Fi 7 MLO連線不穩怎麼查？\n1. 確認AP真的支援MLO(看beacon Multi-Link Element)\n2. 抓driver log搜MLO/link switch/EMLSR\n3. 常見：EMLSR切換太慢(預期<50us有些AP要100us+)；TID-to-link mapping不一致；CSA在一個link發生時MLO行為不一致\n踩坑：某品牌AP 6GHz DFS radar偵測後CSA切channel但MLE link info沒同步→STA認為link斷了\nCR-2026-009正在查，workaround: disable 6GHz只用2.4G+5G"""},
+    {"id": "knowhow-build-001", "title": "[Build/Release Know-How] 自動化打包軟體 Patch 流程",
+     "category": "knowhow", "domain": "build",
+     "content": """作者：Build Team\nQ: 怎麼打包patch給客戶？\n1. 從Gerrit找cherry-pick commits，確認有CR number+code review\n2. 切branch: git checkout -b patch_vX.X.X_hotfix customer/vX.X.X\n3. Cherry-pick(按dependency順序)\n4. 觸發Jenkins CI build，跑BVT+smoke test\n5. Artifacts上傳Artifactory\n6. release_tool.py --mode=patch 生成package\n7. 上傳客戶FTP通知FAE+PM\n注意：不同客戶baseline不同！conflict找原author不要自己解；每個patch建JIRA Release ticket"""},
 ]
 
 
@@ -255,6 +271,45 @@ def ir_agent_execute(task_description: str) -> dict:
         "mcp_log": mcp.call_log,
     }
 
+
+
+# ============================================================
+# Knowledge Upload Feature (Added for Scene 3)
+# ============================================================
+
+def upload_knowledge(title: str, content: str, domain: str, author: str = "Anonymous") -> dict:
+    """Allow engineers to upload their domain know-how"""
+    import time as _t
+    chroma_client = chromadb.PersistentClient(path=CHROMA_DIR)
+    try:
+        collection = chroma_client.get_collection("policy_docs")
+    except Exception:
+        return {"error": "Vector DB not initialized."}
+    doc_id = f"knowhow-upload-{int(_t.time())}"
+    formatted_content = f"作者：{author}\n\n{content}"
+    collection.add(
+        ids=[doc_id], documents=[formatted_content],
+        metadatas=[{"title": f"[{domain.upper()} Know-How] {title}", "category": "knowhow", "domain": domain.lower()}],
+    )
+    return {"status": "success", "doc_id": doc_id, "title": title, "domain": domain, "message": f"知識已上傳到 {domain} 知識庫！"}
+
+
+def list_knowledge_by_domain() -> dict:
+    """List all know-how documents grouped by domain"""
+    chroma_client = chromadb.PersistentClient(path=CHROMA_DIR)
+    try:
+        collection = chroma_client.get_collection("policy_docs")
+        all_docs = collection.get()
+        domains = {}
+        for i in range(len(all_docs["ids"])):
+            meta = all_docs["metadatas"][i]
+            domain = meta.get("domain", "general")
+            if domain not in domains:
+                domains[domain] = []
+            domains[domain].append({"id": all_docs["ids"][i], "title": meta["title"], "category": meta["category"]})
+        return {"domains": domains, "total": len(all_docs["ids"])}
+    except Exception:
+        return {"error": "Vector DB not initialized."}
 
 if __name__ == "__main__":
     init_vector_db()

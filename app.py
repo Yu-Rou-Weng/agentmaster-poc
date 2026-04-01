@@ -17,7 +17,7 @@ from openai import OpenAI
 
 from a2a_protocol import A2ARouter, A2ATask, A2AMessage, MessageRole, TaskState
 from sql_agent import sql_agent_execute, init_database
-from ir_agent import ir_agent_execute, init_vector_db
+from ir_agent import ir_agent_execute, init_vector_db, upload_knowledge, list_knowledge_by_domain
 
 # ============================================================
 # Flask App Setup
@@ -213,6 +213,47 @@ def health():
     })
 
 
+@app.route("/api/knowledge/upload", methods=["POST"])
+def api_upload_knowledge():
+    data = request.get_json()
+    required = ["title", "content", "domain"]
+    if not data or not all(k in data for k in required):
+        return jsonify({"error": "Missing required fields: title, content, domain"}), 400
+    result = upload_knowledge(
+        title=data["title"], content=data["content"],
+        domain=data["domain"], author=data.get("author", "Anonymous"),
+    )
+    return jsonify(result)
+
+
+@app.route("/api/knowledge/list")
+def api_list_knowledge():
+    return jsonify(list_knowledge_by_domain())
+
+
+@app.route("/api/knowledge/preview")
+def api_preview_knowledge():
+    doc_id = request.args.get("id", "")
+    if not doc_id:
+        return jsonify({"error": "Missing id parameter"}), 400
+    import chromadb
+    from ir_agent import CHROMA_DIR
+    client = chromadb.PersistentClient(path=CHROMA_DIR)
+    try:
+        collection = client.get_collection("policy_docs")
+        result = collection.get(ids=[doc_id])
+        if result["ids"]:
+            return jsonify({
+                "id": result["ids"][0],
+                "title": result["metadatas"][0].get("title", ""),
+                "content": result["documents"][0],
+                "domain": result["metadatas"][0].get("domain", ""),
+            })
+        return jsonify({"error": "Document not found"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 # ============================================================
 # Web UI (Single-file HTML)
 # ============================================================
@@ -314,6 +355,34 @@ WEB_UI_HTML = r"""
       <button class="example-btn" onclick="setQuery('分析 Modem 模組的 CR 趨勢，平均修復時間是多少？最新的 Release Note 有修了哪些問題？')">📋 場景2: Release Note</button>
       <button class="example-btn" onclick="setQuery('退貨率最高的客戶是誰？他們的信用評等會受到什麼影響？')">📑 場景1: 信用評等</button>
     </div>
+    <div class="examples" style="margin-top:4px">
+      <button class="example-btn" style="border-color:#2dd4bf" onclick="setQuery('5G NR handover 失敗要怎麼排查？有哪些常見地雷？')">🧠 場景3: Modem Know-How</button>
+      <button class="example-btn" style="border-color:#2dd4bf" onclick="setQuery('手機待機功耗偏高，要怎麼一步步排查？')">🔋 場景3: Power Know-How</button>
+      <button class="example-btn" style="border-color:#2dd4bf" onclick="setQuery('Wi-Fi 7 MLO 連線一直斷，怎麼 debug？')">📡 場景3: Connectivity Know-How</button>
+      <button class="example-btn" style="border-color:#2dd4bf" onclick="setQuery('怎麼打包 patch 給客戶？完整流程是什麼？')">📦 場景3: Build Know-How</button>
+    </div>
+  </div>
+
+  <div class="input-section" style="margin-bottom:16px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <h3 style="font-size:15px;font-weight:600">📤 上傳 Domain Know-How</h3>
+      <button class="example-btn" onclick="loadKnowledgeList()" style="font-size:11px">查看知識庫</button>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px">
+      <input id="khTitle" placeholder="標題" style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:8px;font-size:13px">
+      <select id="khDomain" style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:8px;font-size:13px">
+        <option value="modem">Modem</option><option value="power">Power</option>
+        <option value="connectivity">Connectivity</option><option value="build">Build/Release</option>
+        <option value="general">General</option>
+      </select>
+      <input id="khAuthor" placeholder="作者" style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:8px;font-size:13px">
+    </div>
+    <textarea id="khContent" placeholder="貼上你的 Know-How 內容..." rows="3" style="width:100%;margin-bottom:8px"></textarea>
+    <div style="display:flex;gap:8px;align-items:center">
+      <button class="btn-primary" onclick="uploadKnowledge()" style="padding:8px 16px;font-size:13px">上傳到知識庫</button>
+      <span id="uploadStatus" style="font-size:12px;color:var(--green)"></span>
+    </div>
+    <div id="knowledgeList" style="display:none;margin-top:12px;background:var(--surface2);border-radius:8px;padding:12px;font-size:12px;max-height:200px;overflow-y:auto"></div>
   </div>
 
   <!-- Loading -->
@@ -448,6 +517,64 @@ function renderResult(data) {
 
 function escapeHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+async function uploadKnowledge() {
+  const title = document.getElementById('khTitle').value.trim();
+  const domain = document.getElementById('khDomain').value;
+  const author = document.getElementById('khAuthor').value.trim() || 'Anonymous';
+  const content = document.getElementById('khContent').value.trim();
+  if (!title || !content) { alert('請填寫標題和內容'); return; }
+  const status = document.getElementById('uploadStatus');
+  status.textContent = '上傳中...'; status.style.color = '#fbbf24';
+  try {
+    const resp = await fetch('/api/knowledge/upload', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({title, content, domain, author}),
+    });
+    const data = await resp.json();
+    if (data.status === 'success') {
+      status.textContent = '✅ ' + data.message; status.style.color = '#4ade80';
+      document.getElementById('khTitle').value = '';
+      document.getElementById('khContent').value = '';
+      document.getElementById('knowledgeList').style.display = 'none';
+      loadKnowledgeList();
+    } else { status.textContent = '❌ ' + (data.error||'Failed'); status.style.color = '#f87171'; }
+  } catch(e) { status.textContent = '❌ ' + e.message; status.style.color = '#f87171'; }
+}
+
+async function loadKnowledgeList() {
+  const el = document.getElementById('knowledgeList');
+  el.style.display = el.style.display === 'none' ? 'block' : 'none';
+  if (el.style.display === 'none') return;
+  el.innerHTML = 'Loading...';
+  try {
+    const resp = await fetch('/api/knowledge/list');
+    const data = await resp.json();
+    let html = '<strong>知識庫總覽（' + data.total + ' 篇）</strong><br><br>';
+    for (const [domain, docs] of Object.entries(data.domains || {})) {
+      html += '<div style="margin-bottom:10px"><strong style="color:#6c8cff">[' + domain.toUpperCase() + ']</strong> (' + docs.length + ' 篇)<br>';
+      docs.forEach(d => {
+        const isNew = d.id.startsWith('knowhow-upload-');
+        const badge = isNew ? ' <span style="background:#4ade80;color:#000;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:600">NEW</span>' : '';
+        const clickHint = ' <span style="color:#9498b3;cursor:pointer" onclick="previewDoc(\'' + d.id + '\')">[預覽]</span>';
+        html += '&nbsp;&nbsp;• ' + d.title + badge + clickHint + '<br>';
+      });
+      html += '</div>';
+    }
+    el.innerHTML = html;
+  } catch(e) { el.innerHTML = 'Error: ' + e.message; }
+}
+
+async function previewDoc(docId) {
+  try {
+    const resp = await fetch('/api/knowledge/preview?id=' + encodeURIComponent(docId));
+    const data = await resp.json();
+    if (data.content) {
+      const el = document.getElementById('knowledgeList');
+      el.innerHTML += '<div style="margin-top:10px;padding:10px;background:#1a1d27;border:1px solid #2d3148;border-radius:6px;white-space:pre-wrap;font-size:12px;line-height:1.6"><strong>' + data.title + '</strong><br><br>' + data.content.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div>';
+    }
+  } catch(e) { alert('Preview failed: ' + e.message); }
 }
 
 document.getElementById('queryInput').addEventListener('keydown', e => {
