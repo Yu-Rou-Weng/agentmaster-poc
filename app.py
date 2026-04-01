@@ -38,18 +38,7 @@ router.register_agent("ir_agent", ir_agent_execute)
 import os
 if not os.path.exists(os.path.join(os.path.dirname(__file__), "demo_data.db")):
     init_database()
-if not os.path.exists(os.path.join(os.path.dirname(__file__), "chroma_db")):
-    init_vector_db()
-else:
-    # Ensure vector DB has data (Render ephemeral filesystem may reset)
-    try:
-        import chromadb
-        _c = chromadb.PersistentClient(path=os.path.join(os.path.dirname(__file__), "chroma_db"))
-        _col = _c.get_collection("policy_docs")
-        if _col.count() == 0:
-            init_vector_db()
-    except Exception:
-        init_vector_db()
+init_vector_db()
 
 
 # ============================================================
@@ -253,22 +242,11 @@ def api_preview_knowledge():
     doc_id = request.args.get("id", "")
     if not doc_id:
         return jsonify({"error": "Missing id parameter"}), 400
-    import chromadb
-    from ir_agent import CHROMA_DIR
-    client = chromadb.PersistentClient(path=CHROMA_DIR)
-    try:
-        collection = client.get_collection("policy_docs")
-        result = collection.get(ids=[doc_id])
-        if result["ids"]:
-            return jsonify({
-                "id": result["ids"][0],
-                "title": result["metadatas"][0].get("title", ""),
-                "content": result["documents"][0],
-                "domain": result["metadatas"][0].get("domain", ""),
-            })
-        return jsonify({"error": "Document not found"}), 404
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    import lite_vectordb
+    doc = lite_vectordb.get_document(doc_id)
+    if doc:
+        return jsonify(doc)
+    return jsonify({"error": "Document not found"}), 404
 
 
 # ============================================================
